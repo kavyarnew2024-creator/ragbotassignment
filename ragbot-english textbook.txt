@@ -1,0 +1,359 @@
+import streamlit as st
+from dotenv import load_dotenv
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain.chains import ConversationalRetrievalChain
+from langchain_core.prompts import PromptTemplate
+
+# --------------------------------------------------
+# LOAD ENV & PAGE SETUP
+# --------------------------------------------------
+load_dotenv()
+
+st.set_page_config(page_title="📘 Class 6 English Chatbot", layout="centered")
+
+# --------------------------------------------------
+# CREATE RAG CHATBOT (RUNS ONLY ONCE)
+# --------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def create_rag_chatbot():
+
+    # 1. Load the textbook PDF
+    loader = PyPDFLoader("class6_english.pdf")
+    documents = loader.load()
+
+    # 2. Split text into chunks
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=80
+    )
+    chunks = splitter.split_documents(documents)
+
+    # 3. Create embeddings
+    embeddings = OpenAIEmbeddings()
+
+    # 4. Store embeddings in FAISS
+    vector_db = FAISS.from_documents(chunks, embeddings)
+    retriever = vector_db.as_retriever(search_kwargs={"k": 4})
+
+    # --------------------------------------------------
+    # TEACHER PROMPT (SIMPLE + CORRECTIVE + MEMORY)
+    # --------------------------------------------------
+    teacher_prompt = PromptTemplate(
+        input_variables=["context", "chat_history", "question"],
+        template="""
+You are a kind and patient English teacher for a Class 6 student.
+
+STRICT RULES:
+1. Answer ONLY using the textbook content.
+2. If the answer is not in the textbook, say:
+   "This answer is not available in your textbook."
+3. Use very simple English.
+4. Explain like you are teaching a 10-year-old.
+5. Keep answers short (3–5 lines).
+6. Use previous questions if the student asks follow-up questions.
+
+Textbook Context:
+{context}
+
+Previous Conversation:
+{chat_history}
+
+Student Question:
+{question}
+
+Teacher Answer (simple words):
+"""
+    )
+
+    # 5. LLM (no hallucination)
+    llm = ChatOpenAI(
+        model="gpt-3.5-turbo",
+        temperature=0
+    )
+
+    # 6. Conversational RAG Chain
+    rag_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=retriever,
+        combine_docs_chain_kwargs={"prompt": teacher_prompt},
+        return_source_documents=False
+    )
+
+    return rag_chain
+
+# --------------------------------------------------
+# EXTRACT LESSONS FROM TEXTBOOK
+# --------------------------------------------------
+@st.cache_resource(show_spinner=False)
+def extract_lessons_from_textbook():
+    """Extract lesson/chapter names from the textbook"""
+    try:
+        loader = PyPDFLoader("class6_english.pdf")
+        documents = loader.load()
+        
+        # Use LLM to extract lesson names
+        llm = ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+        
+        # Take first 10 pages to find table of contents
+        sample_text = "\n".join([doc.page_content for doc in documents[:10]])
+        
+        prompt = f"""
+From this Class 6 English textbook content, extract all lesson/chapter/poem names.
+List ONLY the names, one per line, without numbers or extra text.
+
+Content:
+{sample_text}
+
+Lesson Names:
+"""
+        response = llm.predict(prompt)
+        lessons = [line.strip() for line in response.split("\n") if line.strip()]
+        
+        # Return top 8 lessons
+        return lessons[:8] if lessons else [
+            "A Tale of Two Birds",
+            "The Friendly Mongoose", 
+            "The Shepherd's Treasure",
+            "The Old-Clock Shop",
+            "Tansen",
+            "The Monkey and the Crocodile"
+        ]
+    except:
+        # Fallback lessons if extraction fails
+        return [
+            "A Tale of Two Birds",
+            "The Friendly Mongoose",
+            "The Shepherd's Treasure",
+            "The Old-Clock Shop",
+            "Tansen",
+            "The Monkey and the Crocodile"
+        ]
+
+# --------------------------------------------------
+# SUGGESTED QUESTIONS
+# --------------------------------------------------
+STARTER_QUESTIONS = [
+    "List all lessons and poems in the textbook",
+    "What is the first lesson about?",
+    "Who are the main characters in the stories?",
+    "Tell me about the poems in this book",
+    "What can I learn from these lessons?"
+]
+
+def get_follow_up_suggestions(question, answer):
+    """Generate contextual follow-up questions"""
+    suggestions = []
+    
+    q_lower = question.lower()
+    
+    # Context-aware suggestions
+    if "who" in q_lower or "author" in q_lower or "wrote" in q_lower:
+        suggestions = [
+            "What inspired the author to write this?",
+            "What is the theme of this work?",
+            "What can we learn from this?"
+        ]
+    elif "theme" in q_lower or "about" in q_lower or "tell me" in q_lower:
+        suggestions = [
+            "Who are the main characters?",
+            "What is the moral of this story?",
+            "What are the difficult words in this lesson?"
+        ]
+    elif "summary" in q_lower or "summarize" in q_lower:
+        suggestions = [
+            "Who are the main characters?",
+            "What happens at the end?",
+            "What is the most important part?"
+        ]
+    elif "character" in q_lower:
+        suggestions = [
+            "What does this character do?",
+            "How does this character change?",
+            "What is the moral of this story?"
+        ]
+    elif "word" in q_lower or "meaning" in q_lower or "difficult" in q_lower:
+        suggestions = [
+            "Can you explain this in simpler words?",
+            "Can you use this word in a sentence?",
+            "What is the summary of this lesson?"
+        ]
+    elif "list" in q_lower or "lessons" in q_lower:
+        # Suggest specific lessons
+        lessons = st.session_state.lessons[:3]
+        suggestions = [f"Tell me about '{lesson}'" for lesson in lessons]
+    else:
+        suggestions = [
+            "Can you explain this in detail?",
+            "What are the difficult words here?",
+            "What is the moral of this story?"
+        ]
+    
+    return suggestions[:3]  # Return max 3 suggestions
+
+# --------------------------------------------------
+# SESSION STATE INITIALIZATION
+# --------------------------------------------------
+if "rag_chain" not in st.session_state:
+    with st.spinner("🔄 Loading your English textbook... Please wait!"):
+        st.session_state.rag_chain = create_rag_chatbot()
+        st.session_state.lessons = extract_lessons_from_textbook()
+    st.success("✅ Textbook loaded! You can start asking questions now.")
+
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+
+if "show_suggestions" not in st.session_state:
+    st.session_state.show_suggestions = True
+
+if "lessons" not in st.session_state:
+    st.session_state.lessons = extract_lessons_from_textbook()
+
+# --------------------------------------------------
+# UI HEADER
+# --------------------------------------------------
+st.title("📘 Class 6 English Textbook Chatbot")
+st.caption("Your English teacher — always ready to explain 😊")
+
+# --------------------------------------------------
+# WELCOME MESSAGE & STARTER QUESTIONS
+# --------------------------------------------------
+if len(st.session_state.messages) == 0:
+    st.markdown("### 👋 Welcome! How can I help you today?")
+    st.markdown("""
+**Here's how I can help you:**
+- 📖 Answer questions about stories and poems
+- ✍️ Explain difficult words and meanings
+- 🎭 Tell you about characters and themes
+- 📝 Summarize chapters and lessons
+- 🤔 Help you understand the moral of stories
+""")
+    
+    # Display lessons/poems in the textbook
+    st.markdown("### 📚 Lessons in Your Textbook:")
+    lesson_cols = st.columns(2)
+    for idx, lesson in enumerate(st.session_state.lessons):
+        col = lesson_cols[idx % 2]
+        col.markdown(f"• **{lesson}**")
+    
+    st.markdown("---")
+    
+    st.markdown("### 💡 Click a Question to Get Started:")
+    
+    cols = st.columns(2)
+    for idx, question in enumerate(STARTER_QUESTIONS):
+        col = cols[idx % 2]
+        if col.button(question, key=f"starter_{idx}", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": question})
+            with st.spinner("Thinking..."):
+                result = st.session_state.rag_chain({
+                    "question": question,
+                    "chat_history": st.session_state.chat_history
+                })
+                answer = result["answer"]
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.session_state.chat_history.append((question, answer))
+            st.rerun()
+    
+    st.markdown("### 🎯 Or Ask About a Specific Lesson:")
+    lesson_cols2 = st.columns(3)
+    for idx, lesson in enumerate(st.session_state.lessons[:6]):  # Show first 6 lessons as buttons
+        col = lesson_cols2[idx % 3]
+        if col.button(f"📖 {lesson}", key=f"lesson_{idx}", use_container_width=True):
+            question = f"Tell me about '{lesson}'"
+            st.session_state.messages.append({"role": "user", "content": question})
+            with st.spinner("Thinking..."):
+                result = st.session_state.rag_chain({
+                    "question": question,
+                    "chat_history": st.session_state.chat_history
+                })
+                answer = result["answer"]
+            st.session_state.messages.append({"role": "assistant", "content": answer})
+            st.session_state.chat_history.append((question, answer))
+            st.rerun()
+
+# --------------------------------------------------
+# DISPLAY CHAT HISTORY
+# --------------------------------------------------
+for idx, message in enumerate(st.session_state.messages):
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
+        
+        # Show follow-up suggestions after assistant messages
+        if message["role"] == "assistant" and idx == len(st.session_state.messages) - 1:
+            if len(st.session_state.messages) >= 2:
+                last_question = st.session_state.messages[-2]["content"]
+                suggestions = get_follow_up_suggestions(last_question, message["content"])
+                
+                if suggestions:
+                    st.markdown("**💭 Follow-up questions you might ask:**")
+                    cols = st.columns(len(suggestions))
+                    for i, suggestion in enumerate(suggestions):
+                        if cols[i].button(f"➤ {suggestion}", key=f"followup_{idx}_{i}"):
+                            st.session_state.messages.append({"role": "user", "content": suggestion})
+                            with st.spinner("Thinking..."):
+                                result = st.session_state.rag_chain({
+                                    "question": suggestion,
+                                    "chat_history": st.session_state.chat_history
+                                })
+                                answer = result["answer"]
+                            st.session_state.messages.append({"role": "assistant", "content": answer})
+                            st.session_state.chat_history.append((suggestion, answer))
+                            st.rerun()
+
+# --------------------------------------------------
+# CHAT INPUT & NEW MESSAGE HANDLING
+# --------------------------------------------------
+question = st.chat_input("Ask a question from your English textbook...")
+
+if question:
+    # Add user message to chat history
+    st.session_state.messages.append({"role": "user", "content": question})
+    
+    # Display user message
+    with st.chat_message("user"):
+        st.markdown(f"**{question}**")
+
+    # Show "thinking" message while processing
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            # Get answer from RAG chatbot
+            result = st.session_state.rag_chain({
+                "question": question,
+                "chat_history": st.session_state.chat_history
+            })
+            answer = result["answer"]
+        
+        # Display the answer
+        st.markdown(answer.replace("\n", "  \n"))
+        
+        # Generate and display follow-up suggestions
+        suggestions = get_follow_up_suggestions(question, answer)
+        if suggestions:
+            st.markdown("**💭 Follow-up questions you might ask:**")
+            cols = st.columns(len(suggestions))
+            for i, suggestion in enumerate(suggestions):
+                if cols[i].button(f"➤ {suggestion}", key=f"new_followup_{i}"):
+                    st.session_state.messages.append({"role": "user", "content": suggestion})
+                    with st.spinner("Thinking..."):
+                        result = st.session_state.rag_chain({
+                            "question": suggestion,
+                            "chat_history": st.session_state.chat_history
+                        })
+                        follow_answer = result["answer"]
+                    st.session_state.messages.append({"role": "assistant", "content": follow_answer})
+                    st.session_state.chat_history.append((suggestion, follow_answer))
+                    st.rerun()
+
+    # Add assistant message to chat history
+    st.session_state.messages.append({"role": "assistant", "content": answer})
+
+    # Save conversation for RAG chain memory
+    st.session_state.chat_history.append((question, answer))
+    
+    st.rerun()
